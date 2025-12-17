@@ -1,9 +1,13 @@
 // ====== Utilities ======
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
 function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
 
-// ====== Script parsing ======
+// ====== Script parsing (custom format v1) ======
+// Supported:
+//   # comment
+//   @title: ...
+//   N: narration
+//   D Speaker: dialogue
 function parseScript(text){
   const lines = text.split(/\r?\n/);
   const events = [];
@@ -14,55 +18,55 @@ function parseScript(text){
     if (!line) continue;
     if (line.startsWith("#")) continue;
 
-    // Directives
     if (line.startsWith("@title:")){
       titleOverride = line.slice(7).trim();
       continue;
     }
-    // Narration: N: ...
+
     if (line.startsWith("N:")){
       events.push({ type: "narration", text: line.slice(2).trim() });
       continue;
     }
 
-    // Dialogue: D Name: ...
     if (line.startsWith("D ")){
-      // Find first ":" which separates speaker and text
       const idx = line.indexOf(":");
       if (idx > -1){
-        const left = line.slice(2, idx).trim(); // after "D "
+        const speaker = line.slice(2, idx).trim();
         const textPart = line.slice(idx + 1).trim();
-        events.push({ type: "dialogue", speaker: left, text: textPart });
+        events.push({ type: "dialogue", speaker, text: textPart });
         continue;
       }
     }
 
-    // Fallback: treat unknown as narration (keeps you writing fast)
+    // Fallback: treat unknown as narration so writing stays frictionless
     events.push({ type: "narration", text: raw });
   }
 
   return { titleOverride, events };
 }
 
-// ====== Rendering + state ======
-const elLog = document.getElementById("log");
+// ====== DOM ======
+const elLog   = document.getElementById("log");
 const elTitle = document.getElementById("sceneTitle");
-const elSelect = document.getElementById("sceneSelect");
-const elPrev = document.getElementById("prevBtn");
-const elNext = document.getElementById("nextBtn");
+const elSelect= document.getElementById("sceneSelect");
+const elPrev  = document.getElementById("prevBtn");
+const elNext  = document.getElementById("nextBtn");
 const elReset = document.getElementById("resetBtn");
 const elStage = document.getElementById("stage");
 
+// ====== State ======
 let manifest = null;
+
 let current = {
-  storyId: null,
-  arcId: null,
-  sceneId: null,
+  treeId: null,
+  limbId: null,
+  leafId: null,
   sceneTitle: "",
   events: [],
   idx: 0
 };
 
+// Typewriter state that can be force-finished safely
 let typing = {
   active: false,
   cancelToken: 0,
@@ -72,6 +76,10 @@ let typing = {
 
 function clearLog(){
   elLog.innerHTML = "";
+}
+
+function scrollToBottom(){
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
 }
 
 function appendLineSkeleton(ev){
@@ -105,46 +113,48 @@ function appendLineSkeleton(ev){
   return div;
 }
 
-function scrollToBottom(){
-  // Smooth-ish without fighting user too hard
-  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-}
-
 async function typeInto(node, text, speedMs, token){
   typing.active = true;
+  typing.node = node;
+  typing.fullText = text;
+
   const content = node.querySelector(".content");
   content.textContent = "";
 
+  // caret
   const caret = document.createElement("span");
   caret.className = "caret";
   caret.textContent = "█";
   node.appendChild(caret);
 
   for (let i = 0; i < text.length; i++){
-    if (typing.cancelToken !== token){
-      // cancelled: clean up and let caller decide what to do
-      if (caret && caret.isConnected) caret.remove();
-      typing.active = false;
-      return false;
-    }
+    if (typing.cancelToken !== token) return; // cancelled
     content.textContent += text[i];
     await sleep(speedMs);
   }
 
+  // finished normally
   caret.remove();
   typing.active = false;
-  return true;
+  typing.node = null;
+  typing.fullText = "";
 }
 
-function finishCurrentLine(){
-  if (!typing.active || !typing.node) return false;
-  // Stop the typewriter loop
+function finishTypingIfActive(){
+  if (!typing.active) return false;
+
+  // cancel the running loop
   typing.cancelToken++;
 
-  const content = typing.node.querySelector(".content");
-  if (content) content.textContent = typing.fullText;
-  const caret = typing.node.querySelector(".caret");
-  if (caret) caret.remove();
+  // force-complete current line
+  const node = typing.node;
+  if (node){
+    const content = node.querySelector(".content");
+    if (content) content.textContent = typing.fullText;
+
+    const caret = node.querySelector(".caret");
+    if (caret) caret.remove();
+  }
 
   typing.active = false;
   typing.node = null;
@@ -152,48 +162,18 @@ function finishCurrentLine(){
   return true;
 }
 
-
-async function maybeLoadNextScene(){
-  if (!manifest || !current.storyId) return;
-
-  // Flatten scenes for the current story (tree), in manifest order.
-  const story = manifest.trees.find(t => t.id === current.storyId);
-  if (!story) return;
-
-  const scenes = [];
-  for (const limb of story.limbs){
-    for (const leaf of limb.leaves){
-      scenes.push({ storyId: story.id, arcId: limb.id, sceneId: leaf.id });
-    }
-  }
-
-  const here = scenes.findIndex(s => s.storyId === current.storyId && s.arcId === current.arcId && s.sceneId === current.sceneId);
-  if (here < 0) return;
-
-  const next = scenes[here + 1];
-  if (!next){
-    // End of story: do not auto-load the next story.
-    return;
-  }
-
-  const value = `${next.storyId}::${next.arcId}::${next.sceneId}`;
-  const opt = [...elSelect.options].find(o => o.value === value);
-  if (opt) elSelect.value = value;
-
-  await loadScene(next.storyId, next.arcId, next.sceneId);
-}
-
-function getFlatScenes(man){
+// ====== Manifest helpers (trees/limbs/leaves) ======
+function getFlatLeaves(man){
   const out = [];
-  for (const tree of man.trees){
-    for (const limb of tree.limbs){
-      for (const leaf of limb.leaves){
+  for (const tree of (man.trees ?? [])){
+    for (const limb of (tree.limbs ?? [])){
+      for (const leaf of (limb.leaves ?? [])){
         out.push({
-          storyId: tree.id,
-          storyTitle: tree.title,
-          arcId: limb.id,
-          arcTitle: limb.title,
-          sceneId: leaf.id,
+          treeId: tree.id,
+          treeTitle: tree.title,
+          limbId: limb.id,
+          limbTitle: limb.title,
+          leafId: leaf.id,
           sceneTitle: leaf.title,
           file: leaf.file
         });
@@ -203,25 +183,25 @@ function getFlatScenes(man){
   return out;
 }
 
-function buildSceneSelect(man){
-  const flat = getFlatScenes(man);
+function buildLeafSelect(man){
+  const flat = getFlatLeaves(man);
   elSelect.innerHTML = "";
   for (const s of flat){
     const opt = document.createElement("option");
-    opt.value = `${s.storyId}::${s.arcId}::${s.sceneId}`;
-    opt.textContent = `${s.storyTitle} / ${s.arcTitle} / ${s.sceneTitle}`;
+    opt.value = `${s.treeId}::${s.limbId}::${s.leafId}`;
+    opt.textContent = `${s.treeTitle} / ${s.limbTitle} / ${s.sceneTitle}`;
     opt.dataset.file = s.file;
     elSelect.appendChild(opt);
   }
 }
 
-function findSceneMeta(man, storyId, arcId, sceneId){
-  for (const tree of man.trees){
-    if (tree.id !== storyId) continue;
-    for (const limb of tree.limbs){
-      if (limb.id !== arcId) continue;
-      for (const leaf of limb.leaves){
-        if (leaf.id !== sceneId) continue;
+function findLeafMeta(man, treeId, limbId, leafId){
+  for (const tree of (man.trees ?? [])){
+    if (tree.id !== treeId) continue;
+    for (const limb of (tree.limbs ?? [])){
+      if (limb.id !== limbId) continue;
+      for (const leaf of (limb.leaves ?? [])){
+        if (leaf.id !== leafId) continue;
         return { tree, limb, leaf };
       }
     }
@@ -229,9 +209,31 @@ function findSceneMeta(man, storyId, arcId, sceneId){
   return null;
 }
 
-async function loadScene(storyId, arcId, sceneId){
-  const meta = findSceneMeta(manifest, storyId, arcId, sceneId);
-  if (!meta) throw new Error("Scene not found in manifest.");
+function getNextLeafIdsWithinTree(man, treeId, limbId, leafId){
+  // Flatten leaves for this tree only, in manifest order
+  const flat = [];
+  const tree = (man.trees ?? []).find(t => t.id === treeId);
+  if (!tree) return null;
+
+  for (const limb of (tree.limbs ?? [])){
+    for (const leaf of (limb.leaves ?? [])){
+      flat.push({ limbId: limb.id, leafId: leaf.id });
+    }
+  }
+
+  const idx = flat.findIndex(x => x.limbId === limbId && x.leafId === leafId);
+  if (idx < 0) return null;
+
+  const next = flat[idx + 1];
+  if (!next) return null;
+
+  return { treeId, limbId: next.limbId, leafId: next.leafId };
+}
+
+// ====== Scene/leaf loading ======
+async function loadScene(treeId, limbId, leafId){
+  const meta = findLeafMeta(manifest, treeId, limbId, leafId);
+  if (!meta) throw new Error("Leaf not found in manifest.");
 
   const res = await fetch(meta.leaf.file, { cache: "no-store" });
   if (!res.ok) throw new Error(`Failed to load leaf file: ${meta.leaf.file}`);
@@ -239,9 +241,9 @@ async function loadScene(storyId, arcId, sceneId){
 
   const parsed = parseScript(scriptText);
 
-  current.storyId = storyId;
-  current.arcId = arcId;
-  current.sceneId = sceneId;
+  current.treeId = treeId;
+  current.limbId = limbId;
+  current.leafId = leafId;
   current.sceneTitle = parsed.titleOverride || meta.leaf.title;
   current.events = parsed.events;
   current.idx = 0;
@@ -254,7 +256,6 @@ async function loadScene(storyId, arcId, sceneId){
 }
 
 async function renderUpToIndex(targetIdx){
-  // Render events [0..targetIdx-1] instantly, then stop (idx points to next event)
   clearLog();
   for (let i = 0; i < targetIdx; i++){
     const ev = current.events[i];
@@ -262,20 +263,49 @@ async function renderUpToIndex(targetIdx){
 
     const node = appendLineSkeleton(ev);
     const content = node.querySelector(".content");
-    content.textContent = (ev.type === "dialogue") ? ev.text : ev.text;
+    content.textContent = ev.text;
   }
   scrollToBottom();
 }
 
-async function advance(){
-  // If typing, complete current line instantly
-  if (typing.active){
-    finishCurrentLine();
-    return;
-  }
+// ====== Progress persistence ======
+function saveProgress(){
+  const key = "blackpages_progress_v1";
+  const payload = {
+    treeId: current.treeId,
+    limbId: current.limbId,
+    leafId: current.leafId,
+    idx: current.idx
+  };
+  localStorage.setItem(key, JSON.stringify(payload));
+}
 
+function loadProgress(){
+  const key = "blackpages_progress_v1";
+  try{
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (!p || !p.treeId || !p.limbId || !p.leafId) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+// ====== Navigation actions ======
+async function advance(){
+  // If mid-type, finish instantly (do not advance to next event in same press)
+  if (finishTypingIfActive()) return;
+
+  // End of leaf: auto-load next leaf in same tree (if any)
   if (current.idx >= current.events.length){
-    await maybeLoadNextScene();
+    const nextIds = getNextLeafIdsWithinTree(manifest, current.treeId, current.limbId, current.leafId);
+    if (!nextIds) return; // stop at end of tree
+    const value = `${nextIds.treeId}::${nextIds.limbId}::${nextIds.leafId}`;
+    const opt = [...elSelect.options].find(o => o.value === value);
+    if (opt) elSelect.value = value;
+    await loadScene(nextIds.treeId, nextIds.limbId, nextIds.leafId);
     return;
   }
 
@@ -286,105 +316,56 @@ async function advance(){
   scrollToBottom();
 
   const token = ++typing.cancelToken;
-  const speed = 18; // ms per char; tweak later or make configurable
+  const speed = 18;
 
-  // Track the in-progress line so we can instantly complete it on input
-  typing.node = node;
-  typing.fullText = ev.text;
+  await typeInto(node, ev.text, speed, token);
 
-  const completed = await typeInto(node, ev.text, speed, token);
-  if (!completed){
-    // If cancelled (user clicked), fill instantly.
-    const content = node.querySelector(".content");
-    if (content) content.textContent = ev.text;
-    const caret = node.querySelector(".caret");
-    if (caret) caret.remove();
-    typing.active = false;
-  }
-
-  typing.node = null;
-  typing.fullText = "";
+  // If typing was cancelled, typeInto returned early; force-complete already handled by finishTypingIfActive
+  // But in case of ultra-fast double events, ensure we don't remain active.
+  typing.active = false;
 
   saveProgress();
 }
 
 async function back(){
-  if (typing.active){
-    // If mid-type, treat back as "complete typing" rather than going back
-    finishCurrentLine();
-    return;
-  }
+  // If mid-type, finish (consistent with advance)
+  if (finishTypingIfActive()) return;
+
   current.idx = clamp(current.idx - 1, 0, current.events.length);
   saveProgress();
   await renderUpToIndex(current.idx);
 }
 
 async function restartScene(){
-  typing.cancelToken++;
+  finishTypingIfActive();
   current.idx = 0;
   saveProgress();
   await renderUpToIndex(current.idx);
 }
 
-function saveProgress(){
-  const key = "textvn_progress_v1";
-  const payload = {
-    storyId: current.storyId,
-    arcId: current.arcId,
-    sceneId: current.sceneId,
-    idx: current.idx
-  };
-  localStorage.setItem(key, JSON.stringify(payload));
-}
-
-function loadProgress(){
-  const key = "textvn_progress_v1";
-  try{
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const p = JSON.parse(raw);
-    if (!p || !p.storyId || !p.arcId || !p.sceneId) return null;
-    return p;
-  } catch {
-    return null;
-  }
-}
-
 // ====== Input wiring ======
-function sceneValueToIds(v){
-  const [storyId, arcId, sceneId] = v.split("::");
-  return { storyId, arcId, sceneId };
+function valueToIds(v){
+  const [treeId, limbId, leafId] = v.split("::");
+  return { treeId, limbId, leafId };
 }
 
-elStage.addEventListener("click", async () => {
-  // If typing, cancel token so render completes quickly
-  if (typing.active){
-    finishCurrentLine();
-    return;
-  }
-  await advance();
-});
+elStage.addEventListener("click", advance);
 
 elPrev.addEventListener("click", back);
-elNext.addEventListener("click", async () => {
-  if (typing.active){
-    finishCurrentLine();
-    return;
-  }
-  await advance();
-});
+elNext.addEventListener("click", advance);
 elReset.addEventListener("click", restartScene);
 
 document.addEventListener("keydown", async (e) => {
   if (e.key === "ArrowLeft") { e.preventDefault(); await back(); }
-  if (e.key === "ArrowRight") { e.preventDefault(); if (typing.active){ finishCurrentLine(); } else { await advance(); } }
-  if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (typing.active){ finishCurrentLine(); } else { await advance(); } }
+  if (e.key === "ArrowRight") { e.preventDefault(); await advance(); }
+  if (e.key === " " || e.key === "Enter") { e.preventDefault(); await advance(); }
   if (e.key.toLowerCase() === "r") { e.preventDefault(); await restartScene(); }
 });
 
 elSelect.addEventListener("change", async () => {
-  const ids = sceneValueToIds(elSelect.value);
-  await loadScene(ids.storyId, ids.arcId, ids.sceneId);
+  finishTypingIfActive();
+  const ids = valueToIds(elSelect.value);
+  await loadScene(ids.treeId, ids.limbId, ids.leafId);
 });
 
 // ====== Boot ======
@@ -393,28 +374,31 @@ elSelect.addEventListener("change", async () => {
   if (!res.ok) throw new Error("Failed to load forest/manifest.json");
   manifest = await res.json();
 
-  buildSceneSelect(manifest);
+  buildLeafSelect(manifest);
 
   const saved = loadProgress();
   if (saved){
-    // Try to select saved scene
-    const value = `${saved.storyId}::${saved.arcId}::${saved.sceneId}`;
+    const value = `${saved.treeId}::${saved.limbId}::${saved.leafId}`;
     const opt = [...elSelect.options].find(o => o.value === value);
     if (opt){
       elSelect.value = value;
-      await loadScene(saved.storyId, saved.arcId, saved.sceneId);
-      // Re-render to saved idx
+      await loadScene(saved.treeId, saved.limbId, saved.leafId);
       current.idx = clamp(saved.idx ?? 0, 0, current.events.length);
       await renderUpToIndex(current.idx);
       return;
     }
   }
 
-  // Default to first scene
   const first = elSelect.options[0];
   if (first){
-    const ids = sceneValueToIds(first.value);
-    await loadScene(ids.storyId, ids.arcId, ids.sceneId);
+    const ids = valueToIds(first.value);
+    await loadScene(ids.treeId, ids.limbId, ids.leafId);
   }
-})();
-
+})().catch(err => {
+  console.error(err);
+  // Render a minimal error line so the page doesn't look "blank"
+  const div = document.createElement("div");
+  div.className = "line narration";
+  div.textContent = "ERROR: " + (err?.message || String(err));
+  elLog.appendChild(div);
+});
