@@ -1,0 +1,19 @@
+{
+  "trees": [
+    {
+      "id": "pine",
+      "title": "Untitled",
+      "limbs": [
+        {
+          "id": "limb1",
+          "title": "The First Limb",
+          "leaves": [
+            { "id": "limb1_leaf1", "title": "Test", "file": "forest/pine/limb1_leaf1.txt" },
+            { "id": "limb1_leaf2", "title": "Test, Again", "file": "forest/pine/limb1_leaf2.txt" }
+          ]
+        }
+      ]
+    }
+  ]
+}
+

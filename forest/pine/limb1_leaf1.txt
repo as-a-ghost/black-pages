@@ -1,0 +1,8 @@
+@title: Test
+N: A line of narration is spoken.
+N: Another, much longer, line is spoken. I wonder why I decided to do this instead of just writing the thing I want to write, but I suppose I'm committed now, so the story will have to come later.
+D Someone: I am speaking.
+N: Indeed they are.
+@pause: 350
+D Someone: So...
+

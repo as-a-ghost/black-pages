@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Text VN</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">TEXT//VN</div>
+
+    <div class="controls">
+      <select id="sceneSelect" aria-label="Scene"></select>
+      <button id="prevBtn" title="Back (←)">←</button>
+      <button id="nextBtn" title="Next (→)">→</button>
+      <button id="resetBtn" title="Restart scene (R)">↺</button>
+    </div>
+  </header>
+
+  <main id="stage" tabindex="0" aria-label="Story stage">
+    <div id="sceneTitle" class="scene-title"></div>
+    <div id="log" class="log"></div>
+    <div class="hint">Click / tap to advance · Space/Enter advances · ← back · → next</div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
+
