@@ -19,12 +19,6 @@ function parseScript(text){
       titleOverride = line.slice(7).trim();
       continue;
     }
-    if (line.startsWith("@pause:")){
-      const ms = parseInt(line.slice(7).trim(), 10);
-      if (!Number.isNaN(ms)) events.push({ type: "pause", ms });
-      continue;
-    }
-
     // Narration: N: ...
     if (line.startsWith("N:")){
       events.push({ type: "narration", text: line.slice(2).trim() });
@@ -71,7 +65,9 @@ let current = {
 
 let typing = {
   active: false,
-  cancelToken: 0
+  cancelToken: 0,
+  node: null,
+  fullText: ""
 };
 
 function clearLog(){
@@ -125,7 +121,12 @@ async function typeInto(node, text, speedMs, token){
   node.appendChild(caret);
 
   for (let i = 0; i < text.length; i++){
-    if (typing.cancelToken !== token) return; // cancelled
+    if (typing.cancelToken !== token){
+      // cancelled: clean up and let caller decide what to do
+      if (caret && caret.isConnected) caret.remove();
+      typing.active = false;
+      return;
+    }
     content.textContent += text[i];
     await sleep(speedMs);
   }
@@ -134,13 +135,49 @@ async function typeInto(node, text, speedMs, token){
   typing.active = false;
 }
 
-function cancelTyping(){
-  if (!typing.active) return false;
+function finishCurrentLine(){
+  if (!typing.active || !typing.node) return false;
+  // Stop the typewriter loop
   typing.cancelToken++;
+
+  const content = typing.node.querySelector(".content");
+  if (content) content.textContent = typing.fullText;
+  const caret = typing.node.querySelector(".caret");
+  if (caret) caret.remove();
+
   typing.active = false;
-  // Fill current line immediately by re-rendering last event
-  // (handled by advance() logic)
   return true;
+}
+
+
+async function maybeLoadNextScene(){
+  if (!manifest || !current.storyId) return;
+
+  // Flatten scenes for the current story (tree), in manifest order.
+  const story = manifest.trees.find(t => t.id === current.storyId);
+  if (!story) return;
+
+  const scenes = [];
+  for (const limb of story.limbs){
+    for (const leaf of limb.leaves){
+      scenes.push({ storyId: story.id, arcId: limb.id, sceneId: leaf.id });
+    }
+  }
+
+  const here = scenes.findIndex(s => s.storyId === current.storyId && s.arcId === current.arcId && s.sceneId === current.sceneId);
+  if (here < 0) return;
+
+  const next = scenes[here + 1];
+  if (!next){
+    // End of story: do not auto-load the next story.
+    return;
+  }
+
+  const value = `${next.storyId}::${next.arcId}::${next.sceneId}`;
+  const opt = [...elSelect.options].find(o => o.value === value);
+  if (opt) elSelect.value = value;
+
+  await loadScene(next.storyId, next.arcId, next.sceneId);
 }
 
 function getFlatScenes(man){
@@ -219,7 +256,6 @@ async function renderUpToIndex(targetIdx){
   for (let i = 0; i < targetIdx; i++){
     const ev = current.events[i];
     if (!ev) break;
-    if (ev.type === "pause") continue;
 
     const node = appendLineSkeleton(ev);
     const content = node.querySelector(".content");
@@ -231,31 +267,27 @@ async function renderUpToIndex(targetIdx){
 async function advance(){
   // If typing, complete current line instantly
   if (typing.active){
-    typing.cancelToken++;
-    // Fill current line by fast-forwarding the in-progress event:
-    // Easiest: re-render up to idx+1 and set idx accordingly.
-    // But we don't yet know if idx already incremented.
-    // We'll just force-complete by rendering with full text.
-    // (We increment idx only when we *start* rendering a new event below.)
+    finishCurrentLine();
     return;
   }
 
-  if (current.idx >= current.events.length) return;
+  if (current.idx >= current.events.length){
+    await maybeLoadNextScene();
+    return;
+  }
 
   const ev = current.events[current.idx];
   current.idx++;
-
-  if (ev.type === "pause"){
-    saveProgress();
-    await sleep(ev.ms);
-    return;
-  }
 
   const node = appendLineSkeleton(ev);
   scrollToBottom();
 
   const token = ++typing.cancelToken;
   const speed = 18; // ms per char; tweak later or make configurable
+
+  // Track the in-progress line so we can instantly complete it on input
+  typing.node = node;
+  typing.fullText = (ev.type === \"dialogue\") ? ev.text : ev.text;
 
   // If user cancels typing mid-way, we want to instantly finish the line
   let cancelled = false;
@@ -284,7 +316,7 @@ async function advance(){
 async function back(){
   if (typing.active){
     // If mid-type, treat back as "complete typing" rather than going back
-    typing.cancelToken++;
+    finishCurrentLine();
     return;
   }
   current.idx = clamp(current.idx - 1, 0, current.events.length);
@@ -332,7 +364,7 @@ function sceneValueToIds(v){
 elStage.addEventListener("click", async () => {
   // If typing, cancel token so render completes quickly
   if (typing.active){
-    typing.cancelToken++;
+    finishCurrentLine();
     return;
   }
   await advance();
@@ -341,7 +373,7 @@ elStage.addEventListener("click", async () => {
 elPrev.addEventListener("click", back);
 elNext.addEventListener("click", async () => {
   if (typing.active){
-    typing.cancelToken++;
+    finishCurrentLine();
     return;
   }
   await advance();

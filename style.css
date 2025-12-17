@@ -104,12 +104,7 @@ button:hover, select:hover{
   opacity:.9;
   animation: blink 1s steps(2, start) infinite;
 }
-
-.hint{
-  color: rgba(255,255,255,.28);
-  font-size: 12px;
-  margin-top: 10px;
-}
+ 
 
 @keyframes blink {
   to { opacity: 0; }
