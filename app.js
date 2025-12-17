@@ -125,7 +125,7 @@ async function typeInto(node, text, speedMs, token){
       // cancelled: clean up and let caller decide what to do
       if (caret && caret.isConnected) caret.remove();
       typing.active = false;
-      return;
+      return false;
     }
     content.textContent += text[i];
     await sleep(speedMs);
@@ -133,6 +133,7 @@ async function typeInto(node, text, speedMs, token){
 
   caret.remove();
   typing.active = false;
+  return true;
 }
 
 function finishCurrentLine(){
@@ -146,6 +147,8 @@ function finishCurrentLine(){
   if (caret) caret.remove();
 
   typing.active = false;
+  typing.node = null;
+  typing.fullText = "";
   return true;
 }
 
@@ -287,28 +290,20 @@ async function advance(){
 
   // Track the in-progress line so we can instantly complete it on input
   typing.node = node;
-  typing.fullText = (ev.type === \"dialogue\") ? ev.text : ev.text;
+  typing.fullText = ev.text;
 
-  // If user cancels typing mid-way, we want to instantly finish the line
-  let cancelled = false;
-  const cancelWatcher = setInterval(() => {
-    if (typing.cancelToken !== token){
-      cancelled = true;
-      clearInterval(cancelWatcher);
-    }
-  }, 10);
-
-  await typeInto(node, (ev.type === "dialogue") ? ev.text : ev.text, speed, token);
-  clearInterval(cancelWatcher);
-
-  if (cancelled){
-    // Force complete content
+  const completed = await typeInto(node, ev.text, speed, token);
+  if (!completed){
+    // If cancelled (user clicked), fill instantly.
     const content = node.querySelector(".content");
-    content.textContent = (ev.type === "dialogue") ? ev.text : ev.text;
+    if (content) content.textContent = ev.text;
     const caret = node.querySelector(".caret");
     if (caret) caret.remove();
     typing.active = false;
   }
+
+  typing.node = null;
+  typing.fullText = "";
 
   saveProgress();
 }
@@ -382,8 +377,8 @@ elReset.addEventListener("click", restartScene);
 
 document.addEventListener("keydown", async (e) => {
   if (e.key === "ArrowLeft") { e.preventDefault(); await back(); }
-  if (e.key === "ArrowRight") { e.preventDefault(); if (typing.active){ typing.cancelToken++; } else { await advance(); } }
-  if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (typing.active){ typing.cancelToken++; } else { await advance(); } }
+  if (e.key === "ArrowRight") { e.preventDefault(); if (typing.active){ finishCurrentLine(); } else { await advance(); } }
+  if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (typing.active){ finishCurrentLine(); } else { await advance(); } }
   if (e.key.toLowerCase() === "r") { e.preventDefault(); await restartScene(); }
 });
 
